@@ -84,8 +84,27 @@ python main.py --lang en
 - `runtime.log`（程序运行日志）
 - `order_metrics.jsonl`
 - `trade_records.csv`（当前交易记录快照，dashboard 刷新时按最新状态覆盖写）
+- `signal_samples.jsonl`（每秒价差信号样本，用于校准开平仓参数）
 
 说明：终端仅用于显示 dashboard。程序不会落盘原始 REST/WS 消息，只会写运行日志、订单指标日志和交易记录 CSV 快照。
+
+### 开平仓参数校准
+程序运行时会持续写入 `log/signal_samples.jsonl`，里面记录每秒的双边盘口、当前跨所价差、扣除平均买卖价差后的 adjusted 价差，以及 5m/30m/1h 中位数。
+
+先用观察模式收集一段时间数据：
+```bash
+python main.py --no-hedge
+```
+
+收集 1-24 小时后，用脚本查看阈值候选：
+```bash
+python scripts/analyze_signal_samples.py --file log/signal_samples.jsonl --window-hours 6
+```
+
+脚本会输出 `aggressive`、`balanced`、`conservative` 三组候选：
+- `entry`：建议开仓阈值，来自 adjusted 价差的 p90/p95/p99。
+- `exit`：建议平仓阈值，默认用 adjusted 价差中位数 p50。
+- 样本越多越可靠；少于几百条时只适合粗看，不适合直接实盘。
 
 ---
 
@@ -171,5 +190,24 @@ Default path: `./log`
 - `runtime.log` (runtime log messages)
 - `order_metrics.jsonl`
 - `trade_records.csv` (current trade-record snapshot, overwritten on dashboard refresh with latest state)
+- `signal_samples.jsonl` (per-second signal samples for entry/exit calibration)
 
 Note: the terminal is reserved for the dashboard. Raw REST/WS payloads are not persisted; only runtime logs, order-metrics logs, and trade-record CSV snapshots are written.
+
+### Entry/exit parameter calibration
+While the program runs, it writes `log/signal_samples.jsonl` with per-second quotes, current cross-venue spreads, adjusted spreads after subtracting the average book spread, and 5m/30m/1h medians.
+
+Collect data in observation mode first:
+```bash
+python main.py --no-hedge
+```
+
+After collecting 1-24 hours of samples, inspect threshold candidates:
+```bash
+python scripts/analyze_signal_samples.py --file log/signal_samples.jsonl --window-hours 6
+```
+
+The script prints `aggressive`, `balanced`, and `conservative` candidates:
+- `entry`: suggested entry threshold from adjusted-spread p90/p95/p99.
+- `exit`: suggested exit threshold, using adjusted-spread p50 by default.
+- More samples make the output more reliable; with only a few hundred samples, treat it as rough guidance only.

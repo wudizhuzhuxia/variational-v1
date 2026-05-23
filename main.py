@@ -43,6 +43,7 @@ LOG_DIR = Path("./log")
 OUTPUT_DIR = LOG_DIR
 APP_LOG_FILE = LOG_DIR / "runtime.log"
 TRADE_RECORDS_CSV_FILE = LOG_DIR / "trade_records.csv"
+SIGNAL_SAMPLES_JSONL_FILE = LOG_DIR / "signal_samples.jsonl"
 READY_TIMEOUT_SECONDS = 60.0
 POLL_INTERVAL_SECONDS = 0.05
 HEDGE_SLIPPAGE_BPS = 100.0
@@ -230,8 +231,10 @@ class VariationalToLighterRuntime:
 
         self.orders_file = output_dir / "order_metrics.jsonl" if output_dir else None
         self.trade_records_csv_file = output_dir / TRADE_RECORDS_CSV_FILE.name if output_dir else None
+        self.signal_samples_file = output_dir / SIGNAL_SAMPLES_JSONL_FILE.name if output_dir else None
         self._order_write_lock = asyncio.Lock()
         self._trade_csv_write_lock = asyncio.Lock()
+        self._signal_sample_write_lock = asyncio.Lock()
         self._trade_records_snapshot_sig: str | None = None
 
         self.records: dict[str, OrderLifecycle] = {}
@@ -851,6 +854,14 @@ class VariationalToLighterRuntime:
         return f"[{color}]{self._fmt_pct(current)}[/{color}]"
 
     @staticmethod
+    def _adjust_signal_pct(current: Decimal | None, book_spread_baseline: Decimal | None) -> Decimal | None:
+        if current is None:
+            return None
+        if book_spread_baseline is None:
+            return current
+        return current - book_spread_baseline
+
+    @staticmethod
     def _fill_diff_by_direction(
         side: str,
         var_fill_price: Decimal | None,
@@ -913,6 +924,58 @@ class VariationalToLighterRuntime:
             return None
         return float(median(values))
 
+    async def append_signal_sample(
+        self,
+        *,
+        quote_asset: str | None,
+        var_bid: Decimal | None,
+        var_ask: Decimal | None,
+        lighter_bid: Decimal | None,
+        lighter_ask: Decimal | None,
+        var_book_spread_pct: Decimal | None,
+        lighter_book_spread_pct: Decimal | None,
+        spread_color_baseline: Decimal | None,
+        long_var_short_lighter_pct: Decimal | None,
+        short_var_long_lighter_pct: Decimal | None,
+        long_pct_median_5m: float | None,
+        long_pct_median_30m: float | None,
+        long_pct_median_1h: float | None,
+        short_pct_median_5m: float | None,
+        short_pct_median_30m: float | None,
+        short_pct_median_1h: float | None,
+    ) -> None:
+        if self.signal_samples_file is None:
+            return
+
+        long_adjusted_pct = self._adjust_signal_pct(long_var_short_lighter_pct, spread_color_baseline)
+        short_adjusted_pct = self._adjust_signal_pct(short_var_long_lighter_pct, spread_color_baseline)
+        row = {
+            "logged_at": utc_now(),
+            "ticker": self.ticker,
+            "variational_ticker": self.variational_ticker,
+            "quote_asset": quote_asset,
+            "var_bid": decimal_to_str(var_bid),
+            "var_ask": decimal_to_str(var_ask),
+            "lighter_bid": decimal_to_str(lighter_bid),
+            "lighter_ask": decimal_to_str(lighter_ask),
+            "var_book_spread_pct": decimal_to_str(var_book_spread_pct),
+            "lighter_book_spread_pct": decimal_to_str(lighter_book_spread_pct),
+            "spread_baseline_pct": decimal_to_str(spread_color_baseline),
+            "long_current_pct": decimal_to_str(long_var_short_lighter_pct),
+            "long_adjusted_pct": decimal_to_str(long_adjusted_pct),
+            "long_median_5m_pct": long_pct_median_5m,
+            "long_median_30m_pct": long_pct_median_30m,
+            "long_median_1h_pct": long_pct_median_1h,
+            "short_current_pct": decimal_to_str(short_var_long_lighter_pct),
+            "short_adjusted_pct": decimal_to_str(short_adjusted_pct),
+            "short_median_5m_pct": short_pct_median_5m,
+            "short_median_30m_pct": short_pct_median_30m,
+            "short_median_1h_pct": short_pct_median_1h,
+        }
+        line = json.dumps(row, ensure_ascii=True) + "\n"
+        async with self._signal_sample_write_lock:
+            await asyncio.to_thread(self._append_line, self.signal_samples_file, line)
+
     async def render_dashboard(self) -> Group:
         var_bid, var_ask, quote_asset = await self.get_variational_best_bid_ask(self.variational_ticker)
         lighter_bid, lighter_ask = await self.get_lighter_best_bid_ask()
@@ -937,6 +1000,25 @@ class VariationalToLighterRuntime:
         short_pct_median_5m = self._median_cross_spread(5 * 60, long_side=False)
         short_pct_median_30m = self._median_cross_spread(30 * 60, long_side=False)
         short_pct_median_1h = self._median_cross_spread(60 * 60, long_side=False)
+
+        await self.append_signal_sample(
+            quote_asset=quote_asset,
+            var_bid=var_bid,
+            var_ask=var_ask,
+            lighter_bid=lighter_bid,
+            lighter_ask=lighter_ask,
+            var_book_spread_pct=var_book_spread_pct,
+            lighter_book_spread_pct=lighter_book_spread_pct,
+            spread_color_baseline=spread_color_baseline,
+            long_var_short_lighter_pct=long_var_short_lighter_pct,
+            short_var_long_lighter_pct=short_var_long_lighter_pct,
+            long_pct_median_5m=long_pct_median_5m,
+            long_pct_median_30m=long_pct_median_30m,
+            long_pct_median_1h=long_pct_median_1h,
+            short_pct_median_5m=short_pct_median_5m,
+            short_pct_median_30m=short_pct_median_30m,
+            short_pct_median_1h=short_pct_median_1h,
+        )
 
         async with self._record_lock:
             recent_keys = list(self.record_order)[-DASHBOARD_ORDERS:]
