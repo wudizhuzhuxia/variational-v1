@@ -142,10 +142,10 @@ class RustLighterGatewayClient(LocalWsRpcClient):
 
     async def place_order(self, payload: dict[str, Any], *, timeout_ms: int = 5000) -> dict[str, Any]:
         request_id = str(payload.get("request_id") or payload.get("requestId") or uuid.uuid4())
+        gateway_payload = {key: value for key, value in payload.items() if key not in {"request_id", "requestId"}}
         message = {
             "type": "PLACE_ORDER",
-            "request_id": request_id,
             "requestId": request_id,
-            **payload,
+            **gateway_payload,
         }
         return await self.request(message, timeout_ms=timeout_ms)
