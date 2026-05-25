@@ -1,0 +1,47 @@
+[package]
+name = "goldilocks-crypto"
+version = "0.1.1"
+edition = "2021"
+authors = ["bvvvp009"]
+license = "MIT OR Apache-2.0"
+description = "Rust implementation of ECgFp5 elliptic curve and Schnorr signatures over the Goldilocks field"
+repository = "https://github.com/bvvvp009/lighter-rust"
+keywords = ["schnorr", "elliptic-curve", "goldilocks", "signature", "cryptography"]
+categories = ["cryptography", "algorithms"]
+readme = "README.md"
+
+[dependencies]
+poseidon-hash = { path = "../poseidon-hash", version = "0.1.0" }
+# Optional serde support for serialization
+serde = { version = "1.0", features = ["derive"], optional = true }
+hex = "0.4"
+thiserror = "1.0"
+rand = "0.8"
+num-bigint = "0.4"
+
+[features]
+default = []
+serde = ["dep:serde", "poseidon-hash/serde"]
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = "0.8"
+poseidon-hash = { path = "../poseidon-hash", version = "0.1.0" }
+
+[[bench]]
+name = "scalar_field"
+harness = false
+
+[[bench]]
+name = "scalar_ops"
+harness = false
+
+[[bench]]
+name = "schnorr"
+harness = false
+
+[[bench]]
+name = "poseidon_hash"
+harness = false
+
+

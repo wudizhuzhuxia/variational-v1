@@ -1,0 +1,19 @@
+[package]
+name = "lighter_gateway"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.21"
+futures = "0.3"
+hex = "0.4"
+poseidon-hash = { path = "../vendor/lighter-rust/poseidon-hash" }
+goldilocks-crypto = { path = "../vendor/lighter-rust/crypto" }
+signer = { path = "../vendor/lighter-rust/signer" }
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+url = "2.5"

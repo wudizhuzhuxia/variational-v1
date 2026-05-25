@@ -638,11 +638,17 @@ class CommandBroker:
             forward_payload = {
                 "type": "PLACE_ORDER",
                 "requestId": request_id,
+                "signalId": payload.get("signalId"),
                 "side": side,
                 "amount": amount,
+                "amountMode": payload.get("amountMode"),
                 "market": payload.get("market"),
                 "account": payload.get("account"),
+                "dryRun": payload.get("dryRun", True),
                 "timeoutMs": payload.get("timeoutMs"),
+                "referencePrice": payload.get("referencePrice"),
+                "baseQty": payload.get("baseQty"),
+                "notionalUsd": payload.get("notionalUsd"),
                 "timestamp": utc_now(),
             }
             await self._send(extension, forward_payload)

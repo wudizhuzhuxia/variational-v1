@@ -2,10 +2,133 @@ const DEBUGGER_VERSION = "1.3";
 const MAX_QUEUE_SIZE = 1000;
 const AUTO_RELOAD_COOLDOWN_MS = 5000;
 
+const DEFAULT_VAR_ORDER_SCRIPT = String.raw`
+return (async () => {
+  const MAX_QUOTE_USD = 25;
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const textOf = (el) =>
+    (el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0;
+  };
+  const click = (el) => {
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+  };
+  const setInputValue = (input, value) => {
+    const setter =
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")?.set ||
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter.call(input, String(value));
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+
+  const side = String(payload.side || "").toUpperCase();
+  const market = String(payload.market || "BTC").toUpperCase();
+  const amountMode = String(payload.amountMode || "quote").toLowerCase();
+  const amount = String(payload.amount || payload.notionalUsd || "").trim();
+
+  if (!["BUY", "SELL"].includes(side)) {
+    throw new Error("Unsupported side: " + payload.side);
+  }
+  if (!amount || Number(amount) <= 0) {
+    throw new Error("Invalid amount: " + amount);
+  }
+  if (amountMode === "quote" && Number(amount) > MAX_QUOTE_USD) {
+    throw new Error("Quote amount " + amount + " exceeds script safety cap " + MAX_QUOTE_USD);
+  }
+
+  const sideWord = side === "BUY" ? "Buy" : "Sell";
+  const panels = [...document.querySelectorAll("div")]
+    .filter(visible)
+    .filter((el) => {
+      const t = textOf(el);
+      const r = el.getBoundingClientRect();
+      return r.x > window.innerWidth * 0.45 &&
+        t.includes("Available to Trade") &&
+        t.includes("Current Position") &&
+        t.includes("Size");
+    });
+  const panel = panels.sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
+  if (!panel) {
+    throw new Error("Order panel not found.");
+  }
+
+  const buttons = [...panel.querySelectorAll("button")].filter(visible);
+  const marketButton = buttons.find((btn) => textOf(btn) === "Market");
+  if (marketButton && !marketButton.disabled) {
+    click(marketButton);
+    await sleep(80);
+  }
+
+  const sideButton = buttons.find((btn) => {
+    const t = textOf(btn);
+    return t.startsWith(sideWord) && t.includes("$") && t !== sideWord + " " + market;
+  });
+  if (sideButton && !sideButton.disabled && sideButton.getAttribute("aria-disabled") !== "true") {
+    click(sideButton);
+    await sleep(150);
+  }
+
+  const unitButton = [...panel.querySelectorAll("button")]
+    .filter(visible)
+    .find((btn) => ["$", market].includes(textOf(btn)));
+  if (unitButton) {
+    const currentUnit = textOf(unitButton);
+    const wantedUnit = amountMode === "base" ? market : "$";
+    if (currentUnit !== wantedUnit) {
+      click(unitButton);
+      await sleep(100);
+    }
+  }
+
+  const amountInput = [...panel.querySelectorAll('input[type="text"]')]
+    .filter(visible)
+    .sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
+  if (!amountInput) {
+    throw new Error("Size input not found.");
+  }
+
+  amountInput.focus();
+  setInputValue(amountInput, amount);
+  await sleep(250);
+
+  const submitButton = [...panel.querySelectorAll("button")]
+    .filter(visible)
+    .find((btn) => textOf(btn) === sideWord + " " + market);
+  if (!submitButton) {
+    throw new Error(sideWord + " " + market + " submit button not found.");
+  }
+
+  const result = {
+    ok: true,
+    side,
+    market,
+    amount,
+    amountMode,
+    inputValue: amountInput.value,
+    submitText: textOf(submitButton),
+    submitDisabled: Boolean(submitButton.disabled) || submitButton.getAttribute("aria-disabled") === "true",
+    seenAt: new Date().toISOString()
+  };
+  if (result.submitDisabled) {
+    throw new Error("Submit button disabled: " + JSON.stringify(result));
+  }
+
+  click(submitButton);
+  return { ...result, clickedAt: new Date().toISOString() };
+})();
+`.trim();
+
 const DEFAULT_CONFIG = {
   wsEndpoint: "ws://127.0.0.1:8766",
   restEndpoint: "ws://127.0.0.1:8767",
+  commandEndpoint: "ws://127.0.0.1:8768",
   domainFilter: "variational",
+  varOrderScript: DEFAULT_VAR_ORDER_SCRIPT,
   restAllowlist: [
     "https://omni.variational.io/api/quotes/indicative"
   ],
@@ -23,6 +146,8 @@ const state = {
   pendingResponses: new Map(),
   websocketMeta: new Map(),
   lastError: null,
+  lastCommandAt: null,
+  lastCommandResult: null,
   lastAutoReloadAt: 0
 };
 
@@ -152,8 +277,83 @@ class ForwardSocket {
   }
 }
 
+class CommandSocket extends ForwardSocket {
+  constructor() {
+    super("command", "commandEndpoint");
+  }
+
+  connect() {
+    if (!state.active) {
+      return;
+    }
+
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
+    const endpoint = this.endpoint;
+    if (!endpoint) {
+      this.status = "disconnected";
+      notifyStatus();
+      return;
+    }
+
+    this.status = "connecting";
+    notifyStatus();
+
+    try {
+      const socket = new WebSocket(endpoint);
+      this.ws = socket;
+
+      socket.onopen = () => {
+        if (this.ws !== socket) {
+          return;
+        }
+        this.status = "connected";
+        socket.send(JSON.stringify({ type: "REGISTER", role: "extension", timestamp: nowIso() }));
+        this.flush();
+        notifyStatus();
+      };
+
+      socket.onmessage = (event) => {
+        if (this.ws !== socket) {
+          return;
+        }
+        handleCommandMessage(event.data).catch((error) => {
+          state.lastError = `Command handling failed: ${error.message}`;
+          notifyStatus();
+        });
+      };
+
+      socket.onclose = () => {
+        if (this.ws !== socket) {
+          return;
+        }
+        this.ws = null;
+        this.status = "disconnected";
+        notifyStatus();
+        this.scheduleReconnect();
+      };
+
+      socket.onerror = () => {
+        if (this.ws !== socket) {
+          return;
+        }
+        this.status = "error";
+        notifyStatus();
+      };
+    } catch (error) {
+      this.status = "error";
+      state.lastError = `${this.label} socket connect failed: ${error.message}`;
+      notifyStatus();
+      this.scheduleReconnect();
+    }
+  }
+}
+
 const wsForwarder = new ForwardSocket("websocket", "wsEndpoint");
 const restForwarder = new ForwardSocket("rest", "restEndpoint");
+const commandSocket = new CommandSocket();
 
 function autoReloadAttachedTab(reason) {
   if (!state.active || state.attachedTabId == null) {
@@ -189,7 +389,9 @@ function sanitizeConfig(incoming = {}) {
   return {
     wsEndpoint: asStringOrDefault(incoming.wsEndpoint, DEFAULT_CONFIG.wsEndpoint),
     restEndpoint: asStringOrDefault(incoming.restEndpoint, DEFAULT_CONFIG.restEndpoint),
+    commandEndpoint: asStringOrDefault(incoming.commandEndpoint, DEFAULT_CONFIG.commandEndpoint),
     domainFilter: asStringOrDefault(incoming.domainFilter, DEFAULT_CONFIG.domainFilter),
+    varOrderScript: asStringOrDefault(incoming.varOrderScript, DEFAULT_CONFIG.varOrderScript),
     restAllowlist: sanitizeRestAllowlist(incoming.restAllowlist),
     wsAllowlist: sanitizeAllowlist(incoming.wsAllowlist, DEFAULT_CONFIG.wsAllowlist)
   };
@@ -337,6 +539,7 @@ async function startForwarding(tabId = null) {
 
   try {
     await sendDebuggerCommand(targetTabId, "Network.enable");
+    await sendDebuggerCommand(targetTabId, "Runtime.enable");
   } catch (error) {
     await debuggerDetach(targetTabId);
     throw error;
@@ -347,6 +550,7 @@ async function startForwarding(tabId = null) {
   state.lastError = null;
   wsForwarder.connect();
   restForwarder.connect();
+  commandSocket.connect();
   autoReloadAttachedTab("forwarder started");
   notifyStatus();
   return getStatus();
@@ -374,6 +578,7 @@ function cleanupForwardingState() {
   state.lastAutoReloadAt = 0;
   wsForwarder.close();
   restForwarder.close();
+  commandSocket.close();
 }
 
 function getStatus() {
@@ -383,9 +588,12 @@ function getStatus() {
     config: state.config,
     sockets: {
       websocket: wsForwarder.status,
-      rest: restForwarder.status
+      rest: restForwarder.status,
+      command: commandSocket.status
     },
-    lastError: state.lastError
+    lastError: state.lastError,
+    lastCommandAt: state.lastCommandAt,
+    lastCommandResult: state.lastCommandResult
   };
 }
 
@@ -393,6 +601,147 @@ function notifyStatus() {
   chrome.runtime.sendMessage({ event: "status", status: getStatus() }).catch(() => {
     // No listeners (popup closed), safe to ignore.
   });
+}
+
+function sendCommandResult(requestId, payload) {
+  commandSocket.send({
+    type: "ORDER_RESULT",
+    requestId,
+    timestamp: nowIso(),
+    ...payload
+  });
+}
+
+async function handleCommandMessage(rawMessage) {
+  let payload;
+  try {
+    payload = JSON.parse(rawMessage);
+  } catch {
+    return;
+  }
+  if (!payload || typeof payload !== "object") {
+    return;
+  }
+
+  const msgType = String(payload.type || "").toUpperCase();
+  if (msgType === "REGISTER_ACK" || msgType === "ORDER_DISPATCHED" || msgType === "PONG") {
+    return;
+  }
+  if (msgType === "PING") {
+    commandSocket.send({ type: "PONG", timestamp: nowIso() });
+    return;
+  }
+  if (msgType !== "PLACE_ORDER") {
+    return;
+  }
+
+  const requestId = String(payload.requestId || "");
+  state.lastCommandAt = nowIso();
+  try {
+    const result = await executeVariationalOrderCommand(payload);
+    state.lastCommandResult = {
+      requestId,
+      ok: Boolean(result.ok),
+      dryRun: Boolean(result.dryRun),
+      completedAt: nowIso()
+    };
+    sendCommandResult(requestId, result);
+  } catch (error) {
+    const result = {
+      ok: false,
+      error: error.message,
+      timings: { totalMs: 0 }
+    };
+    state.lastCommandResult = {
+      requestId,
+      ok: false,
+      completedAt: nowIso(),
+      error: error.message
+    };
+    sendCommandResult(requestId, result);
+  } finally {
+    notifyStatus();
+  }
+}
+
+async function executeVariationalOrderCommand(command) {
+  const startedAt = performance.now();
+  const cdpStartedAt = nowIso();
+  if (!state.active || state.attachedTabId == null) {
+    throw new Error("Forwarder is not attached to a Variational tab.");
+  }
+
+  const orderPayload = {
+    requestId: command.requestId,
+    signalId: command.signalId || null,
+    side: command.side,
+    amount: command.amount,
+    amountMode: command.amountMode || "quote",
+    market: command.market || null,
+    account: command.account || null,
+    dryRun: command.dryRun !== false,
+    referencePrice: command.referencePrice || null,
+    baseQty: command.baseQty || null,
+    notionalUsd: command.notionalUsd || null,
+    timeoutMs: command.timeoutMs || null,
+    receivedAt: nowIso()
+  };
+
+  if (orderPayload.dryRun) {
+    return {
+      ok: true,
+      dryRun: true,
+      requestId: command.requestId,
+      signalId: command.signalId || null,
+      order: orderPayload,
+      timings: {
+        extensionReceivedAt: cdpStartedAt,
+        totalMs: performance.now() - startedAt
+      }
+    };
+  }
+
+  if (!state.config.varOrderScript.trim()) {
+    throw new Error("Live Var order requested, but varOrderScript is empty in the extension config.");
+  }
+
+  const expression = `
+    (async () => {
+      const payload = ${JSON.stringify(orderPayload)};
+      const userCode = ${JSON.stringify(state.config.varOrderScript)};
+      const fn = new Function("payload", userCode);
+      return await fn(payload);
+    })()
+  `;
+  const evaluateStarted = performance.now();
+  const result = await sendDebuggerCommand(state.attachedTabId, "Runtime.evaluate", {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+    timeout: Number(command.timeoutMs || 5000)
+  });
+
+  if (result.exceptionDetails) {
+    const details = result.exceptionDetails;
+    const message = details.text || details.exception?.description || "Runtime.evaluate failed.";
+    throw new Error(message);
+  }
+
+  const value = result.result?.value ?? null;
+  const totalMs = performance.now() - startedAt;
+  return {
+    ok: true,
+    dryRun: false,
+    requestId: command.requestId,
+    signalId: command.signalId || null,
+    order: orderPayload,
+    pageResult: value,
+    timings: {
+      extensionReceivedAt: cdpStartedAt,
+      evaluateMs: performance.now() - evaluateStarted,
+      totalMs
+    }
+  };
 }
 
 function trackResponse(params) {
@@ -573,6 +922,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (state.active) {
         wsForwarder.restart();
         restForwarder.restart();
+        commandSocket.restart();
       }
       notifyStatus();
       return { ok: true, status: getStatus() };

@@ -4,7 +4,9 @@ const inputs = {
   domainFilter: $("domainFilter"),
   wsEndpoint: $("wsEndpoint"),
   restEndpoint: $("restEndpoint"),
-  restAllowlist: $("restAllowlist")
+  commandEndpoint: $("commandEndpoint"),
+  restAllowlist: $("restAllowlist"),
+  varOrderScript: $("varOrderScript")
 };
 
 const statusEl = $("status");
@@ -16,7 +18,10 @@ function toStatusText(status) {
     `Domain filter: ${status.config.domainFilter}`,
     `WS socket (${status.config.wsEndpoint}): ${status.sockets.websocket}`,
     `REST socket (${status.config.restEndpoint}): ${status.sockets.rest}`,
+    `Command socket (${status.config.commandEndpoint}): ${status.sockets.command}`,
     `REST allowlist entries: ${(status.config.restAllowlist || []).length}`,
+    `Last command: ${status.lastCommandAt || "-"}`,
+    `Last command result: ${status.lastCommandResult ? JSON.stringify(status.lastCommandResult) : "-"}`,
     `Last error: ${status.lastError || "-"}`
   ].join("\n");
 }
@@ -25,7 +30,9 @@ function updateFormFromStatus(status) {
   inputs.domainFilter.value = status.config.domainFilter || "";
   inputs.wsEndpoint.value = status.config.wsEndpoint || "";
   inputs.restEndpoint.value = status.config.restEndpoint || "";
+  inputs.commandEndpoint.value = status.config.commandEndpoint || "";
   inputs.restAllowlist.value = (status.config.restAllowlist || []).join("\n");
+  inputs.varOrderScript.value = status.config.varOrderScript || "";
 }
 
 function updateStatus(status) {
@@ -53,7 +60,9 @@ function readConfig() {
     domainFilter: inputs.domainFilter.value.trim(),
     wsEndpoint: inputs.wsEndpoint.value.trim(),
     restEndpoint: inputs.restEndpoint.value.trim(),
-    restAllowlist
+    commandEndpoint: inputs.commandEndpoint.value.trim(),
+    restAllowlist,
+    varOrderScript: inputs.varOrderScript.value
   };
 }
 

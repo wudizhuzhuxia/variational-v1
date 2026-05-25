@@ -79,12 +79,43 @@ Python 脚本开始运行后，打开 Variational 的交易页面，
 python main.py --lang en
 ```
 
+### 信号自动下单
+自动交易默认关闭；开启后也默认 dry-run，不会真实下单。真实下单必须同时加 `--auto-trade --live-trading`。
+
+先启动 Lighter Rust gateway：
+```bash
+cargo run --manifest-path lighter_gateway/Cargo.toml --release
+```
+
+再启动主程序 dry-run：
+```bash
+python main.py --auto-trade --target-ticker BTC --order-amount 20 --order-amount-mode quote --capital-usd 10000 --max-leverage 2
+```
+
+当前入场信号逻辑：
+- 同时支持 `做多 Var / 做空 Lighter` 和 `做空 Var / 做多 Lighter`。
+- 当前跨所价差必须分别高于 30m 和 1h 中位数 `--entry-offset-pct`，默认 `0.008`（百分比值）。
+- Lighter 使用 Rust signer + WebSocket `jsonapi/sendtx`，限价 GTT，并用 `--lighter-max-slippage-bps` 做最大滑点保护，默认 `0.3` bps。
+- Variational 通过 Chrome CDP 命令通道触发。dry-run 会只返回命令快照；live 时插件默认内置已验证的 BTC 下单 DOM 脚本，也可以在插件里覆盖 `Variational order script`。
+
+实盘示例：
+```bash
+python main.py --auto-trade --live-trading --target-ticker BTC --order-amount 20 --order-amount-mode quote --capital-usd 10000 --max-leverage 2
+```
+
+保留旧 Lighter SDK 回退路径：
+```bash
+python main.py --auto-trade --lighter-executor sdk
+```
+
 ### 输出日志
 默认目录：`./log`
 - `runtime.log`（程序运行日志）
 - `order_metrics.jsonl`
 - `trade_records.csv`（当前交易记录快照，dashboard 刷新时按最新状态覆盖写）
 - `signal_samples.jsonl`（每秒价差信号样本，用于校准开平仓参数）
+- `signal_snapshots.jsonl`（每次触发信号时的 Var/Lighter 盘口快照、方向、数量、阈值、杠杆占用）
+- `execution_events.jsonl`（Var/Lighter 构建、派发、结果、成交、耗时、滑点复盘日志）
 
 说明：终端仅用于显示 dashboard。程序不会落盘原始 REST/WS 消息，只会写运行日志、订单指标日志和交易记录 CSV 快照。
 
@@ -185,12 +216,43 @@ Switch dashboard language to Chinese:
 python main.py --lang zh
 ```
 
+### Signal-driven auto orders
+Auto trading is off by default. Even when enabled, it stays in dry-run mode unless `--live-trading` is explicitly provided.
+
+Start the Lighter Rust gateway first:
+```bash
+cargo run --manifest-path lighter_gateway/Cargo.toml --release
+```
+
+Then start the strategy in dry-run mode:
+```bash
+python main.py --auto-trade --target-ticker BTC --order-amount 20 --order-amount-mode quote --capital-usd 10000 --max-leverage 2
+```
+
+Current entry logic:
+- Trades both `Long Var / Short Lighter` and `Short Var / Long Lighter`.
+- Current cross-venue spread must exceed both the 30m and 1h medians by `--entry-offset-pct`, default `0.008` percentage points.
+- Lighter uses the Rust signer + WebSocket `jsonapi/sendtx`, limit/GTT orders, and `--lighter-max-slippage-bps` protection. Default: `0.3` bps.
+- Variational is triggered through the Chrome CDP command channel. Dry-run only returns the command snapshot. Live mode uses the extension's built-in tested BTC DOM order script by default, and you can override it in `Variational order script`.
+
+Live example:
+```bash
+python main.py --auto-trade --live-trading --target-ticker BTC --order-amount 20 --order-amount-mode quote --capital-usd 10000 --max-leverage 2
+```
+
+Legacy Lighter SDK rollback:
+```bash
+python main.py --auto-trade --lighter-executor sdk
+```
+
 ### Output Logs
 Default path: `./log`
 - `runtime.log` (runtime log messages)
 - `order_metrics.jsonl`
 - `trade_records.csv` (current trade-record snapshot, overwritten on dashboard refresh with latest state)
 - `signal_samples.jsonl` (per-second signal samples for entry/exit calibration)
+- `signal_snapshots.jsonl` (signal-time Var/Lighter quote snapshot, direction, size, threshold, leverage usage)
+- `execution_events.jsonl` (Var/Lighter build, dispatch, result, fill, latency, and slippage replay events)
 
 Note: the terminal is reserved for the dashboard. Raw REST/WS payloads are not persisted; only runtime logs, order-metrics logs, and trade-record CSV snapshots are written.
 
