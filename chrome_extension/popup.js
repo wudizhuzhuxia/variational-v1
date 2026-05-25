@@ -11,15 +11,29 @@ const inputs = {
 
 const statusEl = $("status");
 
+const DEFAULTS = {
+  domainFilter: "variational",
+  wsEndpoint: "ws://127.0.0.1:8766",
+  restEndpoint: "ws://127.0.0.1:8767",
+  commandEndpoint: "ws://127.0.0.1:8768",
+  restAllowlist: ["https://omni.variational.io/api/quotes/indicative"],
+  varOrderScript: ""
+};
+
+function configValue(status, key) {
+  return status?.config?.[key] || DEFAULTS[key] || "";
+}
+
 function toStatusText(status) {
+  const sockets = status.sockets || {};
   return [
     `Forwarding: ${status.active ? "ON" : "OFF"}`,
     `Attached tab: ${status.attachedTabId ?? "-"}`,
-    `Domain filter: ${status.config.domainFilter}`,
-    `WS socket (${status.config.wsEndpoint}): ${status.sockets.websocket}`,
-    `REST socket (${status.config.restEndpoint}): ${status.sockets.rest}`,
-    `Command socket (${status.config.commandEndpoint}): ${status.sockets.command}`,
-    `REST allowlist entries: ${(status.config.restAllowlist || []).length}`,
+    `Domain filter: ${configValue(status, "domainFilter")}`,
+    `WS socket (${configValue(status, "wsEndpoint")}): ${sockets.websocket || "disconnected"}`,
+    `REST socket (${configValue(status, "restEndpoint")}): ${sockets.rest || "disconnected"}`,
+    `Command socket (${configValue(status, "commandEndpoint")}): ${sockets.command || "disconnected"}`,
+    `REST allowlist entries: ${(status.config?.restAllowlist || DEFAULTS.restAllowlist).length}`,
     `Last command: ${status.lastCommandAt || "-"}`,
     `Last command result: ${status.lastCommandResult ? JSON.stringify(status.lastCommandResult) : "-"}`,
     `Last error: ${status.lastError || "-"}`
@@ -27,12 +41,12 @@ function toStatusText(status) {
 }
 
 function updateFormFromStatus(status) {
-  inputs.domainFilter.value = status.config.domainFilter || "";
-  inputs.wsEndpoint.value = status.config.wsEndpoint || "";
-  inputs.restEndpoint.value = status.config.restEndpoint || "";
-  inputs.commandEndpoint.value = status.config.commandEndpoint || "";
-  inputs.restAllowlist.value = (status.config.restAllowlist || []).join("\n");
-  inputs.varOrderScript.value = status.config.varOrderScript || "";
+  inputs.domainFilter.value = configValue(status, "domainFilter");
+  inputs.wsEndpoint.value = configValue(status, "wsEndpoint");
+  inputs.restEndpoint.value = configValue(status, "restEndpoint");
+  inputs.commandEndpoint.value = configValue(status, "commandEndpoint");
+  inputs.restAllowlist.value = (status.config?.restAllowlist || DEFAULTS.restAllowlist).join("\n");
+  inputs.varOrderScript.value = configValue(status, "varOrderScript");
 }
 
 function updateStatus(status) {
@@ -57,10 +71,10 @@ function readConfig() {
     .filter((line) => line.length > 0);
 
   return {
-    domainFilter: inputs.domainFilter.value.trim(),
-    wsEndpoint: inputs.wsEndpoint.value.trim(),
-    restEndpoint: inputs.restEndpoint.value.trim(),
-    commandEndpoint: inputs.commandEndpoint.value.trim(),
+    domainFilter: inputs.domainFilter.value.trim() || DEFAULTS.domainFilter,
+    wsEndpoint: inputs.wsEndpoint.value.trim() || DEFAULTS.wsEndpoint,
+    restEndpoint: inputs.restEndpoint.value.trim() || DEFAULTS.restEndpoint,
+    commandEndpoint: inputs.commandEndpoint.value.trim() || DEFAULTS.commandEndpoint,
     restAllowlist,
     varOrderScript: inputs.varOrderScript.value
   };

@@ -162,7 +162,7 @@ class ForwardSocket {
   }
 
   get endpoint() {
-    return state.config[this.configKey];
+    return state.config[this.configKey] || DEFAULT_CONFIG[this.configKey] || "";
   }
 
   connect() {
@@ -378,6 +378,7 @@ function autoReloadAttachedTab(reason) {
 
 async function ensureConfigLoaded() {
   if (state.configLoaded) {
+    state.config = sanitizeConfig(state.config);
     return;
   }
   const stored = await chrome.storage.local.get("forwarderConfig");
@@ -386,14 +387,15 @@ async function ensureConfigLoaded() {
 }
 
 function sanitizeConfig(incoming = {}) {
+  const source = incoming && typeof incoming === "object" ? incoming : {};
   return {
-    wsEndpoint: asStringOrDefault(incoming.wsEndpoint, DEFAULT_CONFIG.wsEndpoint),
-    restEndpoint: asStringOrDefault(incoming.restEndpoint, DEFAULT_CONFIG.restEndpoint),
-    commandEndpoint: asStringOrDefault(incoming.commandEndpoint, DEFAULT_CONFIG.commandEndpoint),
-    domainFilter: asStringOrDefault(incoming.domainFilter, DEFAULT_CONFIG.domainFilter),
-    varOrderScript: asStringOrDefault(incoming.varOrderScript, DEFAULT_CONFIG.varOrderScript),
-    restAllowlist: sanitizeRestAllowlist(incoming.restAllowlist),
-    wsAllowlist: sanitizeAllowlist(incoming.wsAllowlist, DEFAULT_CONFIG.wsAllowlist)
+    wsEndpoint: asStringOrDefault(source.wsEndpoint, DEFAULT_CONFIG.wsEndpoint),
+    restEndpoint: asStringOrDefault(source.restEndpoint, DEFAULT_CONFIG.restEndpoint),
+    commandEndpoint: asStringOrDefault(source.commandEndpoint, DEFAULT_CONFIG.commandEndpoint),
+    domainFilter: asStringOrDefault(source.domainFilter, DEFAULT_CONFIG.domainFilter),
+    varOrderScript: sanitizeVarOrderScript(source.varOrderScript),
+    restAllowlist: sanitizeRestAllowlist(source.restAllowlist),
+    wsAllowlist: sanitizeAllowlist(source.wsAllowlist, DEFAULT_CONFIG.wsAllowlist)
   };
 }
 
@@ -403,6 +405,14 @@ function asStringOrDefault(value, fallback) {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : fallback;
+}
+
+function sanitizeVarOrderScript(value) {
+  const script = asStringOrDefault(value, DEFAULT_CONFIG.varOrderScript);
+  if (script.replace(/\s+/g, " ") === "return await window.placeOrder(payload);") {
+    return DEFAULT_CONFIG.varOrderScript;
+  }
+  return script;
 }
 
 function nowIso() {
@@ -582,14 +592,15 @@ function cleanupForwardingState() {
 }
 
 function getStatus() {
+  state.config = sanitizeConfig(state.config);
   return {
     active: state.active,
     attachedTabId: state.attachedTabId,
     config: state.config,
     sockets: {
-      websocket: wsForwarder.status,
-      rest: restForwarder.status,
-      command: commandSocket.status
+      websocket: wsForwarder.status || "disconnected",
+      rest: restForwarder.status || "disconnected",
+      command: commandSocket.status || "disconnected"
     },
     lastError: state.lastError,
     lastCommandAt: state.lastCommandAt,
