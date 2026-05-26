@@ -1,8 +1,239 @@
 const DEBUGGER_VERSION = "1.3";
 const MAX_QUEUE_SIZE = 1000;
 const AUTO_RELOAD_COOLDOWN_MS = 5000;
+const VAR_FAST_ORDER_VERSION = "fast-order-v1";
 
-const DEFAULT_VAR_ORDER_SCRIPT = String.raw`
+const VAR_FAST_ORDER_INSTALL_SCRIPT = String.raw`
+(() => {
+  const VERSION = "__VAR_FAST_ORDER_VERSION__";
+  const MAX_QUOTE_USD = 25;
+  const textOf = (el) =>
+    (el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0;
+  };
+  const click = (el) => {
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+  };
+  const setInputValue = (input, value) => {
+    const setter =
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")?.set ||
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter.call(input, String(value));
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  const waitUntil = async (predicate, timeoutMs = 120) => {
+    const started = performance.now();
+    let attempts = 0;
+    while (performance.now() - started < timeoutMs) {
+      attempts += 1;
+      if (predicate()) {
+        return { ok: true, attempts, ms: performance.now() - started };
+      }
+      await nextFrame();
+    }
+    return { ok: Boolean(predicate()), attempts, ms: performance.now() - started };
+  };
+  const disabled = (el) =>
+    !el ||
+    Boolean(el.disabled) ||
+    el.getAttribute("aria-disabled") === "true" ||
+    el.classList.contains("disabled");
+  const activeButton = (el) => {
+    const cls = String(el?.className || "");
+    return disabled(el) ||
+      cls.includes("border-azure") ||
+      cls.includes("bg-green") ||
+      cls.includes("bg-red") ||
+      el?.getAttribute("aria-selected") === "true" ||
+      el?.getAttribute("data-state") === "active";
+  };
+
+  let cache = null;
+
+  const findPanel = () => {
+    const panels = [...document.querySelectorAll("div")]
+      .filter(visible)
+      .filter((el) => {
+        const t = textOf(el);
+        const r = el.getBoundingClientRect();
+        return r.x > window.innerWidth * 0.45 &&
+          t.includes("Available to Trade") &&
+          t.includes("Current Position") &&
+          t.includes("Size");
+      });
+    return panels.sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0] || null;
+  };
+
+  const buildCache = (market) => {
+    const panel = findPanel();
+    if (!panel) {
+      throw new Error("Order panel not found.");
+    }
+    const buttons = [...panel.querySelectorAll("button")].filter(visible);
+    const amountInput = [...panel.querySelectorAll('input[type="text"]')]
+      .filter(visible)
+      .sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
+    if (!amountInput) {
+      throw new Error("Size input not found.");
+    }
+    cache = {
+      market,
+      panel,
+      amountInput,
+      builtAt: performance.now(),
+      marketButton: buttons.find((btn) => textOf(btn) === "Market") || null,
+      buySideButton: buttons.find((btn) => {
+        const t = textOf(btn);
+        return t.startsWith("Buy") && t.includes("$") && t !== "Buy " + market;
+      }) || null,
+      sellSideButton: buttons.find((btn) => {
+        const t = textOf(btn);
+        return t.startsWith("Sell") && t.includes("$") && t !== "Sell " + market;
+      }) || null,
+    };
+    return cache;
+  };
+
+  const validCache = (cached, market) =>
+    cached &&
+    cached.market === market &&
+    cached.panel?.isConnected &&
+    cached.amountInput?.isConnected &&
+    visible(cached.panel) &&
+    visible(cached.amountInput);
+
+  const getCache = (market) => validCache(cache, market) ? cache : buildCache(market);
+
+  const findSubmitButton = (ctx, sideWord, market) =>
+    [...ctx.panel.querySelectorAll("button")]
+      .filter(visible)
+      .find((btn) => textOf(btn) === sideWord + " " + market) || null;
+
+  const waitForSubmitButton = async (ctx, sideWord, market, timeoutMs = 120) => {
+    let button = findSubmitButton(ctx, sideWord, market);
+    if (button) {
+      return { button, wait: { ok: true, attempts: 0, ms: 0 } };
+    }
+    let attempts = 0;
+    const started = performance.now();
+    while (performance.now() - started < timeoutMs) {
+      attempts += 1;
+      await nextFrame();
+      button = findSubmitButton(ctx, sideWord, market);
+      if (button) {
+        return { button, wait: { ok: true, attempts, ms: performance.now() - started } };
+      }
+    }
+    return { button: null, wait: { ok: false, attempts, ms: performance.now() - started } };
+  };
+
+  const findUnitButton = (ctx, market) =>
+    [...ctx.panel.querySelectorAll("button")]
+      .filter(visible)
+      .find((btn) => ["$", market].includes(textOf(btn))) || null;
+
+  window.__variationalFastOrder = async (payload) => {
+    const startedAt = performance.now();
+    const side = String(payload.side || "").toUpperCase();
+    const market = String(payload.market || "BTC").toUpperCase();
+    const amountMode = String(payload.amountMode || "quote").toLowerCase();
+    const amount = String(payload.amount || payload.notionalUsd || "").trim();
+
+    if (!["BUY", "SELL"].includes(side)) {
+      throw new Error("Unsupported side: " + payload.side);
+    }
+    if (!amount || Number(amount) <= 0) {
+      throw new Error("Invalid amount: " + amount);
+    }
+    if (amountMode === "quote" && Number(amount) > MAX_QUOTE_USD) {
+      throw new Error("Quote amount " + amount + " exceeds script safety cap " + MAX_QUOTE_USD);
+    }
+
+    let ctx = getCache(market);
+    const rebuilt = ctx.builtAt === undefined ? false : performance.now() - ctx.builtAt < 2;
+    const sideWord = side === "BUY" ? "Buy" : "Sell";
+    const steps = [];
+
+    if (ctx.marketButton && !activeButton(ctx.marketButton) && !disabled(ctx.marketButton)) {
+      click(ctx.marketButton);
+      steps.push("market");
+      await nextFrame();
+    }
+
+    const sideButton = side === "BUY" ? ctx.buySideButton : ctx.sellSideButton;
+    if (sideButton && !disabled(sideButton) && !activeButton(sideButton)) {
+      click(sideButton);
+      steps.push(side.toLowerCase());
+      await nextFrame();
+    }
+
+    const unitButton = findUnitButton(ctx, market);
+    const wantedUnit = amountMode === "base" ? market : "$";
+    if (unitButton && textOf(unitButton) !== wantedUnit && !disabled(unitButton)) {
+      click(unitButton);
+      steps.push("unit");
+      await nextFrame();
+    }
+
+    ctx.amountInput.focus();
+    setInputValue(ctx.amountInput, amount);
+
+    let submitLookup = await waitForSubmitButton(ctx, sideWord, market, steps.length ? 120 : 0);
+    let submitButton = submitLookup.button;
+    if (!submitButton) {
+      ctx = buildCache(market);
+      submitLookup = await waitForSubmitButton(ctx, sideWord, market, 120);
+      submitButton = submitLookup.button;
+    }
+    if (!submitButton) {
+      throw new Error(sideWord + " " + market + " submit button not found.");
+    }
+
+    const waitResult = await waitUntil(() => !disabled(submitButton), 140);
+    const result = {
+      ok: true,
+      version: VERSION,
+      side,
+      market,
+      amount,
+      amountMode,
+      inputValue: ctx.amountInput.value,
+      submitText: textOf(submitButton),
+      submitDisabled: disabled(submitButton),
+      cacheRebuilt: rebuilt,
+      steps,
+      waitSubmitButtonMs: submitLookup.wait.ms,
+      waitSubmitMs: waitResult.ms,
+      seenAt: new Date().toISOString(),
+      totalBeforeClickMs: performance.now() - startedAt,
+    };
+
+    if (result.submitDisabled) {
+      throw new Error("Submit button disabled: " + JSON.stringify(result));
+    }
+
+    click(submitButton);
+    return { ...result, clickedAt: new Date().toISOString(), totalMs: performance.now() - startedAt };
+  };
+  window.__variationalFastOrder.version = VERSION;
+  return { ok: true, version: VERSION, installedAt: new Date().toISOString() };
+})()
+`.trim().replaceAll("__VAR_FAST_ORDER_VERSION__", VAR_FAST_ORDER_VERSION);
+
+const DEFAULT_VAR_ORDER_SCRIPT = `
+if (!window.__variationalFastOrder || window.__variationalFastOrder.version !== ${JSON.stringify(VAR_FAST_ORDER_VERSION)}) {
+  ${VAR_FAST_ORDER_INSTALL_SCRIPT};
+}
+return window.__variationalFastOrder(payload);
+`.trim();
+
+const LEGACY_VAR_ORDER_SCRIPT = String.raw`
 return (async () => {
   const MAX_QUOTE_USD = 25;
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -145,6 +376,7 @@ const state = {
   configLoaded: false,
   pendingResponses: new Map(),
   websocketMeta: new Map(),
+  fastOrderInstalledByTab: new Map(),
   lastError: null,
   lastCommandAt: null,
   lastCommandResult: null,
@@ -409,10 +641,18 @@ function asStringOrDefault(value, fallback) {
 
 function sanitizeVarOrderScript(value) {
   const script = asStringOrDefault(value, DEFAULT_CONFIG.varOrderScript);
-  if (script.replace(/\s+/g, " ") === "return await window.placeOrder(payload);") {
+  const normalized = script.replace(/\s+/g, " ");
+  if (
+    normalized === "return await window.placeOrder(payload);" ||
+    normalized === LEGACY_VAR_ORDER_SCRIPT.replace(/\s+/g, " ")
+  ) {
     return DEFAULT_CONFIG.varOrderScript;
   }
   return script;
+}
+
+function usesDefaultVarOrderScript() {
+  return state.config.varOrderScript.trim() === DEFAULT_CONFIG.varOrderScript.trim();
 }
 
 function nowIso() {
@@ -529,6 +769,46 @@ async function sendDebuggerCommand(tabId, method, params = {}) {
   });
 }
 
+async function evaluateInAttachedTab(expression, timeoutMs) {
+  if (state.attachedTabId == null) {
+    throw new Error("Forwarder is not attached to a Variational tab.");
+  }
+  const result = await sendDebuggerCommand(state.attachedTabId, "Runtime.evaluate", {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+    timeout: Number(timeoutMs || 5000)
+  });
+
+  if (result.exceptionDetails) {
+    const details = result.exceptionDetails;
+    const message = details.text || details.exception?.description || "Runtime.evaluate failed.";
+    throw new Error(message);
+  }
+
+  return result.result?.value ?? null;
+}
+
+async function ensureFastOrderInstalled(timeoutMs) {
+  const tabId = state.attachedTabId;
+  if (tabId != null && state.fastOrderInstalledByTab.get(tabId) === VAR_FAST_ORDER_VERSION) {
+    return { ok: true, version: VAR_FAST_ORDER_VERSION, cached: true };
+  }
+  const expression = `
+    (async () => {
+      if (!window.__variationalFastOrder || window.__variationalFastOrder.version !== ${JSON.stringify(VAR_FAST_ORDER_VERSION)}) {
+        return ${VAR_FAST_ORDER_INSTALL_SCRIPT};
+      }
+      return { ok: true, version: window.__variationalFastOrder.version, alreadyInstalled: true };
+    })()
+  `;
+  const result = await evaluateInAttachedTab(expression, timeoutMs);
+  if (tabId != null && result?.ok) {
+    state.fastOrderInstalledByTab.set(tabId, VAR_FAST_ORDER_VERSION);
+  }
+  return result;
+}
+
 async function getActiveTabId() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tabs.length || tabs[0].id == null) {
@@ -550,6 +830,7 @@ async function startForwarding(tabId = null) {
   try {
     await sendDebuggerCommand(targetTabId, "Network.enable");
     await sendDebuggerCommand(targetTabId, "Runtime.enable");
+    await sendDebuggerCommand(targetTabId, "Page.enable");
   } catch (error) {
     await debuggerDetach(targetTabId);
     throw error;
@@ -584,6 +865,7 @@ function cleanupForwardingState() {
   state.active = false;
   state.pendingResponses.clear();
   state.websocketMeta.clear();
+  state.fastOrderInstalledByTab.clear();
   state.attachedTabId = null;
   state.lastAutoReloadAt = 0;
   wsForwarder.close();
@@ -681,6 +963,7 @@ async function executeVariationalOrderCommand(command) {
   if (!state.active || state.attachedTabId == null) {
     throw new Error("Forwarder is not attached to a Variational tab.");
   }
+  state.config = sanitizeConfig(state.config);
 
   const orderPayload = {
     requestId: command.requestId,
@@ -716,29 +999,29 @@ async function executeVariationalOrderCommand(command) {
     throw new Error("Live Var order requested, but varOrderScript is empty in the extension config.");
   }
 
-  const expression = `
-    (async () => {
-      const payload = ${JSON.stringify(orderPayload)};
-      const userCode = ${JSON.stringify(state.config.varOrderScript)};
-      const fn = new Function("payload", userCode);
-      return await fn(payload);
-    })()
-  `;
   const evaluateStarted = performance.now();
-  const result = await sendDebuggerCommand(state.attachedTabId, "Runtime.evaluate", {
-    expression,
-    awaitPromise: true,
-    returnByValue: true,
-    timeout: Number(command.timeoutMs || 5000)
-  });
-
-  if (result.exceptionDetails) {
-    const details = result.exceptionDetails;
-    const message = details.text || details.exception?.description || "Runtime.evaluate failed.";
-    throw new Error(message);
+  let value;
+  let installMs = 0;
+  if (usesDefaultVarOrderScript()) {
+    const installStarted = performance.now();
+    await ensureFastOrderInstalled(command.timeoutMs);
+    installMs = performance.now() - installStarted;
+    const expression = `
+      window.__variationalFastOrder(${JSON.stringify(orderPayload)})
+    `;
+    value = await evaluateInAttachedTab(expression, command.timeoutMs);
+  } else {
+    const expression = `
+      (async () => {
+        const payload = ${JSON.stringify(orderPayload)};
+        const userCode = ${JSON.stringify(state.config.varOrderScript)};
+        const fn = new Function("payload", userCode);
+        return await fn(payload);
+      })()
+    `;
+    value = await evaluateInAttachedTab(expression, command.timeoutMs);
   }
 
-  const value = result.result?.value ?? null;
   const totalMs = performance.now() - startedAt;
   return {
     ok: true,
@@ -749,6 +1032,7 @@ async function executeVariationalOrderCommand(command) {
     pageResult: value,
     timings: {
       extensionReceivedAt: cdpStartedAt,
+      installMs,
       evaluateMs: performance.now() - evaluateStarted,
       totalMs
     }
@@ -846,6 +1130,11 @@ async function handleDebuggerEvent(source, method, params) {
 
   if (method === "Network.loadingFailed") {
     state.pendingResponses.delete(params.requestId);
+    return;
+  }
+
+  if (method === "Page.frameNavigated" || method === "Page.loadEventFired") {
+    state.fastOrderInstalledByTab.delete(source.tabId);
     return;
   }
 
